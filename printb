@@ -1,0 +1,391 @@
+#!/usr/bin/env perl
+# vim: ts=2 sts=2 sw=2
+#
+# Utility to output integers in binary form.
+#
+use strict;
+use warnings;
+use version;
+use 5.010;
+use Getopt::Long qw(:config bundling no_getopt_compat no_auto_abbrev);
+use Term::ANSIColor q(:constants);
+
+# don't warn about ints >32 bits
+no warnings 'portable';
+
+our $VERSION = version->declare("v2.0.0");
+our $ME = (split m#/#, $0)[-1];
+our $NUMBER = undef;
+our $GROUP  = 8;
+our @GROUPS = ();
+our $WIDTH  = 0;
+our @WIDTHS = (8, 16, 32, 64);
+our $USAGE = <<USAGE ;
+usage: $ME [opts] <arg1> [arg2 ...]
+
+options:
+  -h --help                Output this usage message.
+  -w --width <int>         Width of numbers, in bits. (default: auto)
+  -g --group <int | spec>  Size of groups, in bits. (default: $GROUP)
+  -c --color               Use colors instead of spacing for grouping.
+  -n --number              Number each bit, starting at 0.
+  -N --number-from <int>   Number each bit, starting at <int>.
+  -r --reverse             Number bits from most-significant instead of least.
+  -1 --on                  Highlight ON bits.
+  -0 --off                 Highlight OFF bits.
+
+args:
+      1234...:  decimal
+     01234...:  octal
+  [0x]12ab...:  hexadecimal
+  [0]b1011...:  binary
+
+spec example:
+   3:4:5  12 bits in three groups of 3, 4, and 5, respectively
+  :3:4:5  12+ bits in four groups, first group has all bits not in other three
+  3:4:5:  12+ bits in four groups, last group has all bits not in other three
+  3:4::5  12+ bits in four groups, third groups has all bits not in other three
+USAGE
+
+our %OCT2BIN = (
+  0 => '000', 1 => '001', 2 => '010', 3 => '011',
+  4 => '100', 5 => '101', 6 => '110', 7 => '111',
+);
+our %HEX2BIN = (
+  0 => '0000', 1 => '0001', 2 => '0010', 3 => '0011',
+  4 => '0100', 5 => '0101', 6 => '0110', 7 => '0111',
+  8 => '1000', 9 => '1001', a => '1010', b => '1011',
+  c => '1100', d => '1101', e => '1110', f => '1111',
+);
+
+
+#==============================================================================
+# MAIN
+#==============================================================================
+
+our %O;
+GetOptions(\%O, "help|h", "width|w=i", "group|g=s", "color|c", "reverse|r",
+                "number|n", "number_from|number-from|N=i", "on|1", "off|0",
+                "version|v")
+  or die "$ME: invalid options\n";
+
+if ($O{version}) {
+  print "$VERSION\n";
+  exit 0;
+}
+elsif ($O{help}) {
+  print $USAGE;
+  exit 0;
+}
+elsif (@ARGV == 0) {
+  print STDERR "$ME: see --help for usage\n";
+  exit 1;
+}
+
+if (defined $O{number_from}) {
+  if ($O{number_from} < 0) {
+    print STDERR "$ME: bit numbering must start at >= 0 -- $O{number_from}\n";
+    exit 1;
+  }
+  $NUMBER = $O{number_from};
+}
+elsif (defined $O{number} || defined $O{reverse}) {
+  $NUMBER = 0;
+}
+
+$GROUP = 0         if (defined $NUMBER);
+$GROUP = $O{group} if (defined $O{group} );
+$WIDTH = $O{width} if (defined $O{width} );
+
+if (($O{group} // "") =~ /:/) {
+  $GROUP = 0;
+
+  my @groups = split /:/, $O{group}, -1;
+  my $varlen = 0;
+  foreach my $g (@groups) {
+    if ($g eq "") {
+      if ($varlen) {
+        print STDERR "$ME: multiple variable-length groups -- $O{group}\n";
+        exit 1;
+      }
+      $varlen = 1;
+    }
+    elsif ($g =~ /\D/ or $g < 1) {
+      print STDERR "$ME: invalid group size -- $g\n";
+      exit 1;
+    }
+    push @GROUPS, $g || 0;
+    $GROUP += $GROUPS[-1];
+  }
+}
+elsif ($O{group} && $GROUP =~ /\D/) {
+  print STDERR "$ME: invalid group size or spec -- $GROUP\n";
+  exit 1;
+}
+
+my @values = ();
+my $max_width = 0;
+my $arg_width = 0;
+
+#
+# Get the maximum argument length for nicer output.
+#
+map { $arg_width = length($_) if $arg_width < length($_) } @ARGV;
+
+#
+# Convert values to bit strings.
+#
+while (defined($_ = shift @ARGV)) {
+  my $arg = $_;
+  my $bits = undef;
+
+  s/[,_]//g;
+
+  if (/^(?:\+|-)?[1-9]\d*$/) {
+    my $val = $_ + 0;
+    if ("$val" ne "$_") {
+      die "$ME: decimal number too big for integer type -- $arg\n";
+    }
+
+    $bits = Dec2Bin($val);
+    $bits->{arg} = $arg;
+  }
+  elsif (/^0?o?([0-7]+)$/i) {
+    $bits = Oct2Bin($1);
+    $bits->{arg} = $arg;
+  }
+  elsif (/^0?b([01]+)$/i) {
+    $bits = Bin2Bin($1);
+    $bits->{arg} = $arg;
+  }
+  elsif (/^(?:0?x)?([0-9a-f]+)$/i) {
+    $bits = Hex2Bin(lc $1);
+    $bits->{arg} = $arg;
+  }
+  else {
+    die "$ME: can't figure out number format -- $arg\n";
+  }
+
+  if ($WIDTH && $bits->{width} > $WIDTH) {
+    die "$ME: value does not fit in $WIDTH bits -- $arg\n";
+  }
+
+  if ($bits->{width} > $max_width) {
+    $max_width = $bits->{width};
+  }
+
+  push @values, $bits;
+}
+
+#
+# Normalize to a common width, if no width specified.
+#
+if ($WIDTH == 0) {
+  do {
+    $WIDTH = shift @WIDTHS;
+  } while ($WIDTH < $max_width && @WIDTHS);
+
+  $WIDTH = $max_width if ($WIDTH < $max_width);
+}
+
+#
+# Output the bit number labels, if requested.
+#
+if (defined $NUMBER) {
+  my @header = GenerateHeader($WIDTH, $GROUP);
+  foreach my $line (@header) {
+    if ($arg_width && @values > 1) {
+      print "" . (" " x $arg_width) . "  ";
+    }
+    print "$line\n";
+  }
+}
+
+#
+# Finally, output all the bit strings.
+#
+foreach my $v (@values) {
+  if ($arg_width && @values > 1) {
+    printf "%${arg_width}s  ", $v->{arg};
+  }
+
+  my $w = $WIDTH - $v->{width};
+  if ($w > 0) {
+    $v->{bits} = (($v->{neg} ? '1' : '0') x $w) . $v->{bits};
+  }
+
+  my $bitstr = GroupChars($v->{bits}, $GROUP, $v->{arg});
+  $bitstr = Embolden($bitstr, '1') if ($O{on});
+  $bitstr = Embolden($bitstr, '0') if ($O{off});
+
+  print "$bitstr\n";
+}
+
+exit 0;
+
+#==============================================================================
+# SUBROUTINES
+#==============================================================================
+
+sub Dec2Bin
+{
+  my ($val) = @_;
+  my $bits = '';
+
+  my ($on_bit, $off_bit) = ('1', '0');
+  my $neg = $val < 0 ? 1 : 0;
+  if ($neg) {
+    $val = -$val - 1;
+    ($on_bit, $off_bit) = ('0', '1');
+  }
+
+  while ($val > 0) {
+    $bits = ($val & 1 ? $on_bit : $off_bit) . $bits;
+    $val >>= 1;
+  }
+
+  return { val => $val, bits => $bits, neg => $neg, width => length($bits) };
+}
+
+sub Oct2Bin
+{
+  my ($val) = @_;
+  my $bits = '';
+
+  my @digits = split //, $val;
+  for (@digits) {
+    $bits .= $OCT2BIN{$_};
+  }
+
+  return { val => $val, bits => $bits, neg => 0, width => length($bits) };
+}
+
+sub Hex2Bin
+{
+  my ($val) = @_;
+  my $bits = '';
+
+  my @digits = split //, $val;
+  for (@digits) {
+    $bits .= $HEX2BIN{$_};
+  }
+
+  return { val => $val, bits => $bits, neg => 0, width => length($bits) };
+}
+
+sub Bin2Bin
+{
+  my ($val) = @_;
+
+  return { val => $val, bits => $val, neg => 0, width => length($val) };
+}
+
+sub Embolden
+{
+  my ($bitstr, $chr) = @_;
+
+  my @chars = split //, $bitstr;
+  my ($new, $saved) = ('', '');
+  for (my $i = 0; $i < @chars; $i++) {
+    if ($chars[$i] eq "\e") {
+      $saved  = $chars[$i++];
+      $saved .= $chars[$i++] while ($chars[$i-1] ne 'm');
+      $new   .= $saved;
+      redo if ($i < @chars);
+    }
+    elsif ($chars[$i] eq $chr) {
+      $new .= BOLD;
+      $new .= $chars[$i++] while ($i < @chars && $chars[$i] eq $chr);
+      $new .= RESET . $saved;
+      redo if ($i < @chars);
+    }
+
+    $new .= $chars[$i] // '';
+  }
+
+  return $new;
+}
+
+sub GenerateHeader
+{
+  my ($size, $group) = @_;
+
+  my @header = GenerateRuler($size);
+  push @header, '-' x $size;
+
+  for (my $i = 0; $i < @header; $i++) {
+    $header[$i] = GroupChars($header[$i], $group);
+  }
+
+  return @header;
+}
+
+sub GroupChars
+{
+  my ($chrs, $group, $arg) = @_;
+
+  if ($group > 0) {
+    my @groups = ();
+
+    $chrs = reverse $chrs;
+    if (@GROUPS) {
+      my ($glen, $blen) = ($GROUP, length($chrs));
+      foreach my $l (reverse @GROUPS) {
+        if ($l) {
+          if ($glen > $blen) { die "$ME: not enough bits for spec -- $arg\n" }
+          push @groups, substr($chrs, 0, $l, '');
+        }
+        elsif ($blen - $glen > 0) {
+          push @groups, substr($chrs, 0, $blen - $glen, '');
+        }
+        $blen -= length($groups[-1]);
+        $glen -= $l;
+      }
+
+      if ($chrs) { die "$ME: too many bits for spec -- $arg\n" }
+    }
+    else {
+      @groups = grep { $_ ne '' } split(/(.{$group})/o, $chrs);
+    }
+
+    if (not $O{color}) {
+      $chrs = join(" ", map { $_ = reverse($_) } (reverse @groups));
+    }
+    else {
+      my $n = 0;
+      my $fn = sub { return ($n++ % 2) ? GREEN : CYAN };
+
+      $chrs = join("", map { $_=$fn->().reverse($_).RESET } (reverse @groups));
+    }
+  }
+
+  return $chrs;
+}
+
+sub GenerateRuler
+{
+  my ($size) = @_;
+
+  my ($hi, $lo) = ($NUMBER + $size, $NUMBER);
+  my $num_lines = int(log($hi) / log(10)) + 1;
+  my @header = ('') x $num_lines;
+
+  for (my $l = 0; $l < $num_lines; $l++) {
+    for (my $i = $hi - 1; $i >= $lo; $i--) {
+      if ($i % (10**$l) == 0 && ($i>0 || $l==0) || ($lo>9 && $i==$lo)) {
+        $header[$num_lines - $l - 1] .= int($i / (10 ** $l)) % 10;
+      }
+      else {
+        $header[$num_lines - $l - 1] .= ' ';
+      }
+    }
+  }
+
+  if ($O{reverse}) {
+    @header = map { join("", reverse(split(//, $_))) } @header;
+  }
+
+  return @header;
+}
+
+# eof
