@@ -20,7 +20,7 @@ The options below are supported by the program.
 
 * `-v` `--version`
 
-  Output the version number, currently v2.0.0, and exit.    
+  Output the version number, currently v2.2.0, and exit.
 
 * `-wN` `--width=N`
 
@@ -37,6 +37,9 @@ The options below are supported by the program.
   * `3:4:5:` = 12+ bits in four groups, last group has all bits not in other three
   * `3:4::5` = 12+ bits in four groups, third groups has all bits not in other three
 
+* `--values`
+
+  Interpret each bit group as an integer and output its value.
 
 * `-c` `--color`
 
@@ -67,11 +70,16 @@ The options below are supported by the program.
 Output a 24-bit value as four fields of 10, 6, 3, and 5 bits.
 
 ```
-$ printb -n -w24 -g:6:3:5 0xc0ded
+$ printb -n -w24 -g:6:3:5 --values 0xc0ded
    2          1            
 3210987654 321098 765 43210
 ---------- ------ --- -----
 0000110000 001101 111 01101
+     |        |    |    |  
+     |        |    |    +-- 13
+     |        |    +-- 7
+     |        +-- 13
+     +-- 48 / 0x30
 ```
 
 ### Disclaimer

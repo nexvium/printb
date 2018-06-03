@@ -3,6 +3,9 @@
 #
 # Utility to output integers in binary form.
 #
+# FIXME Retrofitting new features has led to messy code that could benefit
+#       from refactoring.
+#
 use strict;
 use warnings;
 use version;
@@ -13,10 +16,15 @@ use Term::ANSIColor q(:constants);
 # don't warn about ints >32 bits
 no warnings 'portable';
 
-our $VERSION = version->declare("v2.0.0");
+use constant FALSE => 0;
+use constant TRUE => 1;
+
 our $ME = (split m#/#, $0)[-1];
-our $NUMBER = undef;
-our $GROUP  = 8;
+our $VERSION = version->declare("v2.2.0");
+our $NUMBER_BITS = FALSE;
+our $NUMBER_FROM = 0;
+our $GROUP_SIZE  = 8;   # 0 = no grouping
+our $GROUP_VALUES = FALSE;
 our @GROUPS = ();
 our $WIDTH  = 0;
 our @WIDTHS = (8, 16, 32, 64);
@@ -25,8 +33,10 @@ usage: $ME [opts] <arg1> [arg2 ...]
 
 options:
   -h --help                Output this usage message.
+  -v --version             Output the version number.
   -w --width <int>         Width of numbers, in bits. (default: auto)
-  -g --group <int | spec>  Size of groups, in bits. (default: $GROUP)
+  -g --group <int | spec>  Size of groups, in bits. (default: $GROUP_SIZE)
+     --values              Output each group as an integer value.
   -c --color               Use colors instead of spacing for grouping.
   -n --number              Number each bit, starting at 0.
   -N --number-from <int>   Number each bit, starting at <int>.
@@ -66,7 +76,7 @@ our %HEX2BIN = (
 our %O;
 GetOptions(\%O, "help|h", "width|w=i", "group|g=s", "color|c", "reverse|r",
                 "number|n", "number_from|number-from|N=i", "on|1", "off|0",
-                "version|v")
+                "values", "version|v")
   or die "$ME: invalid options\n";
 
 if ($O{version}) {
@@ -87,18 +97,24 @@ if (defined $O{number_from}) {
     print STDERR "$ME: bit numbering must start at >= 0 -- $O{number_from}\n";
     exit 1;
   }
-  $NUMBER = $O{number_from};
+  $NUMBER_BITS = TRUE;
+  $NUMBER_FROM = $O{number_from};
 }
 elsif (defined $O{number} || defined $O{reverse}) {
-  $NUMBER = 0;
+  $NUMBER_BITS = TRUE;
 }
 
-$GROUP = 0         if (defined $NUMBER);
-$GROUP = $O{group} if (defined $O{group} );
+# turn off grouping by default if numbering bits
+$GROUP_SIZE = 0 if ($NUMBER_BITS);
+
+# turn on output of group values if only one argument
+$GROUP_VALUES = TRUE if ($O{values});
+
+$GROUP_SIZE = $O{group} if (defined $O{group} );
 $WIDTH = $O{width} if (defined $O{width} );
 
-if (($O{group} // "") =~ /:/) {
-  $GROUP = 0;
+if ($GROUP_SIZE =~ /:/) {
+  $GROUP_SIZE = 0;
 
   my @groups = split /:/, $O{group}, -1;
   my $varlen = 0;
@@ -115,11 +131,12 @@ if (($O{group} // "") =~ /:/) {
       exit 1;
     }
     push @GROUPS, $g || 0;
-    $GROUP += $GROUPS[-1];
+
+    $GROUP_SIZE += $GROUPS[-1];
   }
 }
-elsif ($O{group} && $GROUP =~ /\D/) {
-  print STDERR "$ME: invalid group size or spec -- $GROUP\n";
+elsif ($GROUP_SIZE =~ /\D/) {
+  print STDERR "$ME: invalid group size or spec -- $GROUP_SIZE\n";
   exit 1;
 }
 
@@ -130,7 +147,9 @@ my $arg_width = 0;
 #
 # Get the maximum argument length for nicer output.
 #
-map { $arg_width = length($_) if $arg_width < length($_) } @ARGV;
+if (@ARGV > 1) {
+  map { $arg_width = length($_) if $arg_width < length($_) } @ARGV;
+}
 
 #
 # Convert values to bit strings.
@@ -191,10 +210,10 @@ if ($WIDTH == 0) {
 #
 # Output the bit number labels, if requested.
 #
-if (defined $NUMBER) {
-  my @header = GenerateHeader($WIDTH, $GROUP);
+if ($NUMBER_BITS) {
+  my @header = GenerateHeader($WIDTH, $GROUP_SIZE);
   foreach my $line (@header) {
-    if ($arg_width && @values > 1) {
+    if ($arg_width) {
       print "" . (" " x $arg_width) . "  ";
     }
     print "$line\n";
@@ -205,7 +224,7 @@ if (defined $NUMBER) {
 # Finally, output all the bit strings.
 #
 foreach my $v (@values) {
-  if ($arg_width && @values > 1) {
+  if ($arg_width) {
     printf "%${arg_width}s  ", $v->{arg};
   }
 
@@ -214,11 +233,15 @@ foreach my $v (@values) {
     $v->{bits} = (($v->{neg} ? '1' : '0') x $w) . $v->{bits};
   }
 
-  my $bitstr = GroupChars($v->{bits}, $GROUP, $v->{arg});
+  my ($bitstr, $bitgrp) = GroupChars($v->{bits}, $GROUP_SIZE, $v->{arg});
   $bitstr = Embolden($bitstr, '1') if ($O{on});
   $bitstr = Embolden($bitstr, '0') if ($O{off});
 
   print "$bitstr\n";
+
+  if ($GROUP_VALUES) {
+    PrintFieldValues($arg_width, $bitgrp);
+  }
 }
 
 exit 0;
@@ -229,10 +252,11 @@ exit 0;
 
 sub Dec2Bin
 {
-  my ($val) = @_;
+  my ($arg) = @_;
   my $bits = '';
 
   my ($on_bit, $off_bit) = ('1', '0');
+  my $val = $arg;
   my $neg = $val < 0 ? 1 : 0;
   if ($neg) {
     $val = -$val - 1;
@@ -244,7 +268,7 @@ sub Dec2Bin
     $val >>= 1;
   }
 
-  return { val => $val, bits => $bits, neg => $neg, width => length($bits) };
+  return { val => $arg, bits => $bits, neg => $neg, width => length($bits) };
 }
 
 sub Oct2Bin
@@ -257,7 +281,7 @@ sub Oct2Bin
     $bits .= $OCT2BIN{$_};
   }
 
-  return { val => $val, bits => $bits, neg => 0, width => length($bits) };
+  return { val => oct("0$val"), bits=>$bits, neg=>0, width => length($bits) };
 }
 
 sub Hex2Bin
@@ -270,14 +294,31 @@ sub Hex2Bin
     $bits .= $HEX2BIN{$_};
   }
 
-  return { val => $val, bits => $bits, neg => 0, width => length($bits) };
+  return { val => hex("0x$val"), bits=>$bits, neg=>0, width => length($bits) };
 }
 
 sub Bin2Bin
 {
-  my ($val) = @_;
+  my ($arg) = @_;
 
-  return { val => $val, bits => $val, neg => 0, width => length($val) };
+  my @digits = split //, $arg;
+  my $val = 0;
+  for (@digits) {
+    $val <<= 1;
+    $val |= $_;
+  }
+
+  return { val => $val, bits => $arg, neg => 0, width => length($arg) };
+}
+
+sub Bin2Int
+{
+  my ($arg) = @_;
+  my $val = 0;
+
+  map { $val = ($val << 1) | $_ } split(//, $arg);
+
+  return $val;
 }
 
 sub Embolden
@@ -323,16 +364,16 @@ sub GenerateHeader
 sub GroupChars
 {
   my ($chrs, $group, $arg) = @_;
+  my @groups = ();
 
+  my $err_sfx = defined($arg) ? " -- $arg" : "";
   if ($group > 0) {
-    my @groups = ();
-
     $chrs = reverse $chrs;
     if (@GROUPS) {
-      my ($glen, $blen) = ($GROUP, length($chrs));
+      my ($glen, $blen) = ($GROUP_SIZE, length($chrs));
       foreach my $l (reverse @GROUPS) {
         if ($l) {
-          if ($glen > $blen) { die "$ME: not enough bits for spec -- $arg\n" }
+          if ($glen > $blen) { die "$ME: not enough bits for spec$err_sfx\n" }
           push @groups, substr($chrs, 0, $l, '');
         }
         elsif ($blen - $glen > 0) {
@@ -342,7 +383,7 @@ sub GroupChars
         $glen -= $l;
       }
 
-      if ($chrs) { die "$ME: too many bits for spec -- $arg\n" }
+      if ($chrs) { die "$ME: too many bits for spec$err_sfx\n" }
     }
     else {
       @groups = grep { $_ ne '' } split(/(.{$group})/o, $chrs);
@@ -356,17 +397,18 @@ sub GroupChars
       my $fn = sub { return ($n++ % 2) ? GREEN : CYAN };
 
       $chrs = join("", map { $_=$fn->().reverse($_).RESET } (reverse @groups));
+      map { s/\e.+?m//g } @groups;
     }
   }
 
-  return $chrs;
+  return wantarray ? ($chrs, [reverse @groups]) : $chrs;
 }
 
 sub GenerateRuler
 {
   my ($size) = @_;
 
-  my ($hi, $lo) = ($NUMBER + $size, $NUMBER);
+  my ($hi, $lo) = ($NUMBER_FROM + $size, $NUMBER_FROM);
   my $num_lines = int(log($hi) / log(10)) + 1;
   my @header = ('') x $num_lines;
 
@@ -386,6 +428,72 @@ sub GenerateRuler
   }
 
   return @header;
+}
+
+sub PrintFieldValues
+{
+  my ($indent_size, $bit_groups) = @_;
+  my ($sep, @c_on, $c_off);
+
+  if ($O{color}) {
+    $sep   = '';
+    @c_on  = ( CYAN, GREEN );
+    $c_off = RESET;
+  }
+  else {
+    $sep   = ' ';
+    @c_on  = ( '', '' );
+    $c_off = '';
+  }
+
+  my @groups = ( );
+  for my $grp (@$bit_groups) {
+    my $w = length $grp;    # width of field
+    my $h = int($w / 2);    # half the width (for placing line)
+    my $i = Bin2Int($grp);  # interger value of field
+    my $s = '';             # the string value of the field
+
+    if ($i < 0xF) {
+      $s = sprintf("%d", $i);
+    }
+    else {
+      $s = sprintf('%1$d / 0x%1$X', $i);
+    }
+
+    push @groups, { w => $w, h => $h, v => $i, s => $s };
+  }
+
+  my $indent = '';
+  if ($indent_size) {
+    $indent = ' ' x $indent_size . '  ';
+  }
+
+  my $n = 0;
+  my $fn = sub { return $c_on[$n++ % 2] };
+  print $indent
+        . join($sep,
+             map { $fn->() . FieldPlaceAt($_->{h}, $_->{w}, '|') . $c_off }
+                 @groups)
+        . "\n";
+
+  while (@groups) {
+    $n = 0;
+
+    my $grp = pop(@groups);
+    my @fields = map { $fn->() . FieldPlaceAt($_->{h}, $_->{w}, '|') . $c_off }
+                     @groups;
+    push @fields, $fn->() . ' ' x $grp->{h} . '+-- ' . $grp->{s} . $c_off;
+    print $indent . join($sep, @fields), "\n";
+  }
+
+  return;
+}
+
+sub FieldPlaceAt
+{
+  my ($pos, $len, $str) = @_;
+  $str = (' ' x $pos) . $str;
+  return $str . (' ' x ($len - length($str)));
 }
 
 # eof
