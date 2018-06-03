@@ -20,7 +20,7 @@ The options below are supported by the program.
 
 * `-v` `--version`
 
-  Output the version number, currently v2.2.0, and exit.
+  Output the version number, currently v2.2.x, and exit.
 
 * `-wN` `--width=N`
 
@@ -76,9 +76,9 @@ $ printb -n -w24 -g:6:3:5 --values 0xc0ded
 ---------- ------ --- -----
 0000110000 001101 111 01101
      |        |    |    |  
-     |        |    |    +-- 13
+     |        |    |    +-- 13 / 0xD
      |        |    +-- 7
-     |        +-- 13
+     |        +-- 13 / 0xD
      +-- 48 / 0x30
 ```
 

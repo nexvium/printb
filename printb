@@ -20,7 +20,7 @@ use constant FALSE => 0;
 use constant TRUE => 1;
 
 our $ME = (split m#/#, $0)[-1];
-our $VERSION = version->declare("v2.2.0");
+our $VERSION = version->declare("v2.2.1");
 our $NUMBER_BITS = FALSE;
 our $NUMBER_FROM = 0;
 our $GROUP_SIZE  = 8;   # 0 = no grouping
@@ -453,7 +453,7 @@ sub PrintFieldValues
     my $i = Bin2Int($grp);  # interger value of field
     my $s = '';             # the string value of the field
 
-    if ($i < 0xF) {
+    if ($i < 10) {
       $s = sprintf("%d", $i);
     }
     else {
